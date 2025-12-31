@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package stock;
+
+option go_package = "github.com/tiongMax/gostocks/proto/stock";
+
+// StockTick represents a single price update for a stock symbol.
+message StockTick {
+  string symbol = 1;     // e.g., "AAPL", "GOOGL"
+  double price = 2;      // e.g., 150.25
+  int64 timestamp = 3;   // Unix timestamp in milliseconds
+}
+
+
