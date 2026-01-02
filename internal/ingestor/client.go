@@ -4,20 +4,35 @@ import (
 	"encoding/json"
 	"log"
 
+	"github.com/IBM/sarama"
 	"github.com/gorilla/websocket"
+	stock "github.com/tiongMax/gostocks/proto"
+	"google.golang.org/protobuf/proto"
 )
 
 type Client struct {
-	apiKey  string
-	conn    *websocket.Conn
-	symbols []string
+	apiKey   string
+	conn     *websocket.Conn
+	symbols  []string
+	producer sarama.SyncProducer
 }
 
-func NewClient(apiKey string, symbols []string) *Client {
-	return &Client{
-		apiKey:  apiKey,
-		symbols: symbols,
+func NewClient(apiKey string, symbols []string, kafkaBrokers []string) (*Client, error) {
+	config := sarama.NewConfig()
+	config.Producer.Return.Successes = true
+	config.Producer.RequiredAcks = sarama.WaitForAll
+	config.Producer.Retry.Max = 5
+
+	producer, err := sarama.NewSyncProducer(kafkaBrokers, config)
+	if err != nil {
+		return nil, err
 	}
+
+	return &Client{
+		apiKey:   apiKey,
+		symbols:  symbols,
+		producer: producer,
+	}, nil
 }
 
 func (c *Client) Start() error {
@@ -65,12 +80,45 @@ func (c *Client) readLoop() {
 		if response.Type == "trade" {
 			for _, trade := range response.Data {
 				log.Printf("Tick: %s | Price: %.2f | Time: %d", trade.Symbol, trade.Price, trade.Timestamp)
+
+				// Create Protobuf message
+				tick := &stock.StockTick{
+					Symbol:    trade.Symbol,
+					Price:     trade.Price,
+					Timestamp: trade.Timestamp,
+				}
+
+				// Serialize to bytes
+				bytes, err := proto.Marshal(tick)
+				if err != nil {
+					log.Printf("Failed to marshal protobuf: %v", err)
+					continue
+				}
+
+				// Send to Kafka
+				msg := &sarama.ProducerMessage{
+					Topic: "market_ticks",
+					Key:   sarama.StringEncoder(trade.Symbol), // Use Symbol as Key for ordering
+					Value: sarama.ByteEncoder(bytes),
+				}
+
+				partition, offset, err := c.producer.SendMessage(msg)
+				if err != nil {
+					log.Printf("Failed to send message to Kafka: %v", err)
+				} else {
+					log.Printf("Message sent to partition %d at offset %d", partition, offset)
+				}
 			}
 		}
 	}
 }
 
 func (c *Client) Close() error {
+	if c.producer != nil {
+		if err := c.producer.Close(); err != nil {
+			log.Println("Error closing Kafka producer:", err)
+		}
+	}
 	if c.conn != nil {
 		return c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 	}

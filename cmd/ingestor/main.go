@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -22,9 +23,18 @@ func main() {
 		log.Fatal("FINNHUB_API_KEY environment variable is not set")
 	}
 
+	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
+	if kafkaBrokers == "" {
+		kafkaBrokers = "localhost:9092"
+	}
+	brokers := strings.Split(kafkaBrokers, ",")
+
 	// 2. Initialize and Start Client
 	symbols := []string{"AAPL", "BINANCE:BTCUSDT", "IC MARKETS:1"}
-	client := ingestor.NewClient(apiKey, symbols)
+	client, err := ingestor.NewClient(apiKey, symbols, brokers)
+	if err != nil {
+		log.Fatal("Failed to create ingestor client:", err)
+	}
 
 	if err := client.Start(); err != nil {
 		log.Fatal("Failed to start ingestor:", err)
