@@ -9,11 +9,15 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// Consumer manages the connection to Kafka and processing logic.
 type Consumer struct {
 	brokers []string
 	topic   string
 }
 
+// NewConsumer creates a Consumer instance.
+// brokers: List of Kafka bootstrap servers (e.g., ["localhost:9092"])
+// topic: The Kafka topic name to consume from (e.g., "market_ticks")
 func NewConsumer(brokers []string, topic string) *Consumer {
 	return &Consumer{
 		brokers: brokers,
@@ -21,34 +25,31 @@ func NewConsumer(brokers []string, topic string) *Consumer {
 	}
 }
 
+// Start initializes the Kafka connection and enters a blocking loop.
+// It consumes messages from Partition 0 and logs throughput metrics.
 func (c *Consumer) Start() error {
+	// 1. Configure Sarama
 	config := sarama.NewConfig()
 	config.Consumer.Return.Errors = true
 
+	// 2. Connect to Broker
 	consumer, err := sarama.NewConsumer(c.brokers, config)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if err := consumer.Close(); err != nil {
-			log.Printf("Error closing consumer: %v", err)
-		}
-	}()
+	// ... defer close ...
 
-	// Consume partition 0
+	// 3. Start Consuming Partition 0
+	// OffsetNewest means we only see messages sent after we connect.
 	partitionConsumer, err := consumer.ConsumePartition(c.topic, 0, sarama.OffsetNewest)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if err := partitionConsumer.Close(); err != nil {
-			log.Printf("Error closing partition consumer: %v", err)
-		}
-	}()
+	// ... defer close ...
 
 	log.Printf("Connected to Kafka, consuming topic: %s", c.topic)
 
-	// Metrics loop
+	// 4. Main Event Loop
 	msgCount := 0
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -56,14 +57,16 @@ func (c *Consumer) Start() error {
 	for {
 		select {
 		case msg := <-partitionConsumer.Messages():
+			// A. Deserialize Protobuf
 			var tick stock.StockTick
 			if err := proto.Unmarshal(msg.Value, &tick); err != nil {
 				log.Printf("Error unmarshaling message: %v", err)
 				continue
 			}
-			msgCount++
+			msgCount++ // B. Increment metric
 
 		case <-ticker.C:
+			// C. Report Throughput
 			if msgCount > 0 {
 				log.Printf("Throughput: %d messages/sec", msgCount)
 				msgCount = 0
@@ -74,5 +77,3 @@ func (c *Consumer) Start() error {
 		}
 	}
 }
-
-

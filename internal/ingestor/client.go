@@ -10,6 +10,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// Client represents the ingestor client that connects to the Finnhub WebSocket API
+// and produces market data messages to a Kafka topic.
 type Client struct {
 	apiKey   string
 	conn     *websocket.Conn
@@ -17,6 +19,8 @@ type Client struct {
 	producer sarama.SyncProducer
 }
 
+// NewClient creates a new instance of the ingestor Client.
+// It initializes the Kafka producer with the provided broker addresses.
 func NewClient(apiKey string, symbols []string, kafkaBrokers []string) (*Client, error) {
 	config := sarama.NewConfig()
 	config.Producer.Return.Successes = true
@@ -35,6 +39,8 @@ func NewClient(apiKey string, symbols []string, kafkaBrokers []string) (*Client,
 	}, nil
 }
 
+// Start connects to the Finnhub WebSocket API, subscribes to the configured symbols,
+// and starts the background read loop to process incoming trade messages.
 func (c *Client) Start() error {
 	url := "wss://ws.finnhub.io?token=" + c.apiKey
 	log.Printf("Connecting to %s", url)
@@ -62,6 +68,9 @@ func (c *Client) Start() error {
 	return nil
 }
 
+// readLoop continuously reads messages from the WebSocket connection,
+// processes trade data, and sends it to the Kafka topic.
+// It handles JSON unmarshalling, Protobuf serialization, and Kafka production.
 func (c *Client) readLoop() {
 	defer c.conn.Close()
 	for {
@@ -113,6 +122,8 @@ func (c *Client) readLoop() {
 	}
 }
 
+// Close gracefully shuts down the client by closing the Kafka producer
+// and sending a close message to the WebSocket connection.
 func (c *Client) Close() error {
 	if c.producer != nil {
 		if err := c.producer.Close(); err != nil {
