@@ -6,7 +6,7 @@ import (
 
 	"github.com/IBM/sarama"
 	"github.com/gorilla/websocket"
-	stock "github.com/tiongMax/gostocks/proto"
+	stock "github.com/tiongMax/gostocks/proto/stock"
 	"google.golang.org/protobuf/proto"
 )
 

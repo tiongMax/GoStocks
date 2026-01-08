@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/IBM/sarama"
-	stock "github.com/tiongMax/gostocks/proto"
+	stock "github.com/tiongMax/gostocks/proto/stock"
 	"google.golang.org/protobuf/proto"
 )
 

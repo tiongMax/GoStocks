@@ -87,3 +87,23 @@ func (s *Store) MarkAlertTriggered(alertID int) error {
 	}
 	return nil
 }
+
+// GetAlertsByUser retrieves alerts for a specific user.
+// If userID is 0, retrieves alerts for all users.
+// If activeOnly is true, only non-triggered alerts are returned.
+func (s *Store) GetAlertsByUser(userID int, activeOnly bool) ([]Alert, error) {
+	var alerts []Alert
+	query := s.db.Model(&Alert{})
+
+	if userID > 0 {
+		query = query.Where("user_id = ?", userID)
+	}
+	if activeOnly {
+		query = query.Where("triggered = ?", false)
+	}
+
+	if err := query.Find(&alerts).Error; err != nil {
+		return nil, fmt.Errorf("failed to query alerts: %w", err)
+	}
+	return alerts, nil
+}

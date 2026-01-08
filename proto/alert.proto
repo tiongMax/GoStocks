@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package alert;
+
+option go_package = "github.com/tiongMax/gostocks/proto/alert";
+
+// Condition for price alerts
+enum AlertCondition {
+  CONDITION_UNSPECIFIED = 0;
+  ABOVE = 1;
+  BELOW = 2;
+}
+
+// CreateAlertRequest is the request message for creating a new alert.
+message CreateAlertRequest {
+  int32 user_id = 1;
+  string symbol = 2;          // Stock symbol, e.g., "AAPL"
+  double target_price = 3;    // Target price to trigger alert
+  AlertCondition condition = 4; // ABOVE or BELOW
+}
+
+// CreateAlertResponse is the response message after creating an alert.
+message CreateAlertResponse {
+  int32 alert_id = 1;
+  string message = 2;
+}
+
+// GetAlertsRequest is the request message for retrieving alerts.
+message GetAlertsRequest {
+  int32 user_id = 1;           // Filter by user (0 = all users)
+  bool active_only = 2;        // Only return non-triggered alerts
+}
+
+// Alert represents a single alert entry.
+message Alert {
+  int32 id = 1;
+  int32 user_id = 2;
+  string symbol = 3;
+  double target_price = 4;
+  AlertCondition condition = 5;
+  bool triggered = 6;
+  int64 created_at = 7;        // Unix timestamp
+}
+
+// GetAlertsResponse is the response message containing a list of alerts.
+message GetAlertsResponse {
+  repeated Alert alerts = 1;
+}
+
+// AlertService provides RPC methods for managing price alerts.
+service AlertService {
+  // CreateAlert creates a new price alert for a user.
+  rpc CreateAlert(CreateAlertRequest) returns (CreateAlertResponse);
+  
+  // GetAlerts retrieves alerts based on filter criteria.
+  rpc GetAlerts(GetAlertsRequest) returns (GetAlertsResponse);
+}
+
