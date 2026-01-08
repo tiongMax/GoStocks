@@ -107,3 +107,13 @@ func (s *Store) GetAlertsByUser(userID int, activeOnly bool) ([]Alert, error) {
 	}
 	return alerts, nil
 }
+
+// GetActiveAlertsBySymbol retrieves all untriggered alerts for a specific symbol.
+// This is optimized for the trigger logic to check only relevant alerts.
+func (s *Store) GetActiveAlertsBySymbol(symbol string) ([]Alert, error) {
+	var alerts []Alert
+	if err := s.db.Where("symbol = ? AND triggered = ?", symbol, false).Find(&alerts).Error; err != nil {
+		return nil, fmt.Errorf("failed to query alerts for symbol %s: %w", symbol, err)
+	}
+	return alerts, nil
+}

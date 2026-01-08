@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/tiongMax/gostocks/internal/alert"
@@ -14,7 +15,7 @@ import (
 )
 
 func main() {
-	// 1. Connection String (Default to localhost for local dev)
+	// 1. Database Connection String
 	connStr := os.Getenv("DATABASE_URL")
 	if connStr == "" {
 		connStr = "user=user password=password dbname=gostocks sslmode=disable host=127.0.0.1 port=5433"
@@ -26,6 +27,19 @@ func main() {
 		grpcPort = "50051"
 	}
 
+	// 3. Kafka Configuration
+	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
+	if kafkaBrokers == "" {
+		kafkaBrokers = "localhost:9092"
+	}
+	brokers := strings.Split(kafkaBrokers, ",")
+
+	kafkaTopic := os.Getenv("KAFKA_TOPIC")
+	if kafkaTopic == "" {
+		kafkaTopic = "market_ticks"
+	}
+
+	// 4. Connect to Database
 	log.Println("Connecting to database...")
 	store, err := alert.NewStore(connStr)
 	if err != nil {
@@ -33,14 +47,21 @@ func main() {
 	}
 	defer store.Close()
 
-	// 3. Auto-migrate schema
+	// 5. Auto-migrate schema
 	log.Println("Auto-migrating schema...")
 	if err := store.AutoMigrate(); err != nil {
 		log.Fatalf("Failed to auto-migrate schema: %v", err)
 	}
 	log.Println("Schema migrated successfully.")
 
-	// 4. Create gRPC server
+	// 6. Start Kafka Consumer (Trigger Logic)
+	consumer := alert.NewConsumer(brokers, kafkaTopic, store)
+	if err := consumer.Start(); err != nil {
+		log.Fatalf("Failed to start Kafka consumer: %v", err)
+	}
+	defer consumer.Stop()
+
+	// 7. Create gRPC Server
 	grpcServer := grpc.NewServer()
 	alertServer := alert.NewServer(store)
 	pb.RegisterAlertServiceServer(grpcServer, alertServer)
@@ -48,13 +69,13 @@ func main() {
 	// Enable reflection for tools like grpcurl
 	reflection.Register(grpcServer)
 
-	// 5. Start listening
+	// 8. Start gRPC Listener
 	listener, err := net.Listen("tcp", ":"+grpcPort)
 	if err != nil {
 		log.Fatalf("Failed to listen on port %s: %v", grpcPort, err)
 	}
 
-	// 6. Run server in goroutine
+	// 9. Run gRPC Server in goroutine
 	go func() {
 		log.Printf("Alert Service gRPC server listening on :%s", grpcPort)
 		if err := grpcServer.Serve(listener); err != nil {
@@ -62,7 +83,9 @@ func main() {
 		}
 	}()
 
-	// 7. Wait for shutdown signal
+	log.Println("Alert Service is fully running (gRPC + Kafka Consumer)")
+
+	// 10. Wait for shutdown signal
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
