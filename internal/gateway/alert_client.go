@@ -129,4 +129,3 @@ func (a *AlertClient) GetAlerts(ctx context.Context, userID int32, activeOnly bo
 func (a *AlertClient) Close() error {
 	return a.conn.Close()
 }
-

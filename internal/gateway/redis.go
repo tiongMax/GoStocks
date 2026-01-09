@@ -77,4 +77,3 @@ func (r *RedisClient) GetPrice(ctx context.Context, symbol string) (*PriceData, 
 func (r *RedisClient) Close() error {
 	return r.client.Close()
 }
-

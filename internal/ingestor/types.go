@@ -12,4 +12,3 @@ type TradeData struct {
 	Timestamp int64   `json:"t"` // UNIX milliseconds timestamp
 	Volume    float64 `json:"v"` // Volume
 }
-

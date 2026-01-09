@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
@@ -9,13 +10,12 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/tiongMax/gostocks/internal/ingestor"
-	"github.com/tiongMax/gostocks/pkg/logger"
-	"log/slog"
 )
 
 func main() {
-	// 0. Initialize Logger
-	logger.Init()
+	// Configure JSON logger
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
 
 	// 1. Load Environment Variables
 	if err := godotenv.Load(".env"); err != nil {
@@ -49,6 +49,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	slog.Info("Ingestor service started", "symbols", symbols)
+
 	// 5. Wait for Shutdown Signal
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
@@ -61,7 +63,6 @@ func main() {
 		slog.Error("Error closing client", "error", err)
 	}
 
-	// Give it a moment to flush buffers
-	time.Sleep(1 * time.Second)
+	time.Sleep(500 * time.Millisecond)
 	slog.Info("Ingestor service stopped")
 }

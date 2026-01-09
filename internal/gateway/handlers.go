@@ -112,4 +112,3 @@ func (h *Handler) HealthCheck(c *gin.Context) {
 		"service": "gateway",
 	})
 }
-

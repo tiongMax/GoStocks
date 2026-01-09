@@ -4,64 +4,155 @@ GoStocks is a high-performance, distributed microservices backend designed to ha
 
 ## 🏗 Architecture Overview
 
-The system is split into specialized services to ensure scalability and fault tolerance:
+```
+┌─────────────┐       ┌─────────────┐       ┌─────────────┐
+│   Finnhub   │──────▶│  Ingestor   │──────▶│    Kafka    │
+│  WebSocket  │       │  (Producer) │       │ market_ticks│
+└─────────────┘       └─────────────┘       └──────┬──────┘
+                                                   │
+                            ┌──────────────────────┴──────────────────────┐
+                            │                                             │
+                   ┌────────▼────────┐                           ┌────────▼────────┐
+                   │    Processor    │                           │  Alert Service  │
+                   │ (Consumer Group)│                           │ (Consumer Group)│
+                   └────────┬────────┘                           └────────┬────────┘
+                            │                                             │
+                   ┌────────▼────────┐                           ┌────────▼────────┐
+                   │     Redis       │                           │   PostgreSQL    │
+                   │  (Speed Layer)  │                           │    (Alerts)     │
+                   └────────┬────────┘                           └────────┬────────┘
+                            │                                             │
+                            └──────────────────────┬──────────────────────┘
+                                                   │
+                                          ┌────────▼────────┐
+                                          │   API Gateway   │
+                                          │   (REST/Gin)    │
+                                          └────────┬────────┘
+                                                   │
+                                          ┌────────▼────────┐
+                                          │     Clients     │
+                                          └─────────────────┘
+```
 
-* **Ingestor Service:** Connects to external market WebSockets (Finnhub/Alpaca). It acts as a producer, pushing raw market "ticks" into a Kafka topic.
-* **Processor Service:** A Kafka consumer that performs real-time calculations (e.g., Price Volatility, Moving Averages) and updates a **Redis Speed Layer** for instant UI lookups.
-* **Alert Service:** Manages user-defined price thresholds stored in **PostgreSQL**. It monitors the live stream and triggers notifications when price conditions are met.
-* **API Gateway:** The entry point for clients. It provides REST endpoints for price queries (via Redis) and alert management (via gRPC to the Alert Service).
+The system is split into specialized services:
+
+* **Ingestor Service:** Connects to Finnhub WebSocket and pushes raw market ticks into Kafka.
+* **Processor Service:** Consumes from Kafka and updates Redis for instant price lookups.
+* **Alert Service:** Consumes from Kafka, checks price conditions, and exposes gRPC API for alert management.
+* **API Gateway:** REST API for clients to query prices and manage alerts.
 
 ## 🛠 Tech Stack
 
 | Layer | Technology |
 | --- | --- |
-| **Language** | **Go (Golang)** - Chosen for concurrency and performance |
-| **Communication** | **gRPC / Protocol Buffers** (Internal) & **REST / Gin** (Public) |
-| **Messaging** | **Apache Kafka** - Distributed message broker for event streaming |
-| **Speed Layer** | **Redis** - For sub-millisecond price lookups |
-| **Persistence** | **PostgreSQL** - Relational storage for user alerts and profiles |
-| **Infrastructure** | **Docker & Docker Compose** - For containerized orchestration |
-
----
-
-## 🗺 14-Day Development Roadmap
-
-This roadmap is designed to produce a "Working App" at the end of every day.
-
-### **Phase 1: Streaming Infrastructure (Week 1)**
-
-* **Day 1: Scaffolding** – Init Go modules, set up `docker-compose.yml` with Kafka, Redis, and Postgres.
-* **Day 2: The Data Contract** – Define `stock.proto` and generate Go code for Protobuf structs.
-* **Day 3: Live Ingestion** – Build the Ingestor Service to connect to a WebSocket (Finnhub) and log prices.
-* **Day 4: Kafka Integration** – Ingestor Service now publishes JSON/Protobuf messages to the Kafka topic.
-* **Day 5: Processor Service** – Build a consumer that reads from Kafka and logs throughput metrics.
-* **Day 6: The Speed Layer** – Processor service updates Redis keys (`price:AAPL`) for every incoming tick.
-* **Day 7: E2E Verification** – A small CLI tool that queries Redis to verify real-time flow from Web → Kafka → Redis.
-
-### **Phase 2: Logic, Persistence & APIs (Week 2)**
-
-* **Day 8: Database Design** – Create Postgres schema for `users` and `alerts` (symbol, target_price, condition).
-* **Day 9: Alert Service (gRPC)** – Implement the gRPC server to handle `CreateAlert` and `GetAlerts` calls.
-* **Day 10: Trigger Logic** – Alert Service consumes Kafka; checks every tick against the Postgres database.
-* **Day 11: The Gateway** – Build a Gin-based REST API to expose `GET /price/:symbol` (hitting Redis).
-* **Day 12: Command Flow** – Connect Gateway to Alert Service via gRPC for `POST /alerts`.
-* **Day 13: Error Handling** – Implement Graceful Shutdown and Kafka "Consumer Group" logic for fault tolerance.
-* **Day 14: Final Polish** – Add structured logging (Zap/Slog), write unit tests for the Processor logic, and record a demo.
-
----
+| **Language** | Go (Golang) |
+| **Communication** | gRPC / Protocol Buffers (Internal) & REST / Gin (Public) |
+| **Messaging** | Apache Kafka with Consumer Groups |
+| **Speed Layer** | Redis |
+| **Persistence** | PostgreSQL with GORM |
+| **Logging** | Structured JSON logging (slog) |
+| **Infrastructure** | Docker & Docker Compose |
 
 ## 🚦 Getting Started
 
-1. **Clone the repo:** `git clone https://github.com/youruser/gostocks`
-2. **Launch Infra:** `docker-compose up -d`
-3. **Run Ingestor:** `go run cmd/ingestor/main.go`
-4. **Run Processor:** `go run cmd/processor/main.go`
+### Prerequisites
 
----
+- Go 1.21+
+- Docker & Docker Compose
+- Finnhub API Key (free at [finnhub.io](https://finnhub.io))
 
-### **Engineering Challenges Solved (Resume Talking Points)**
+### 1. Start Infrastructure
 
-* **Handling Backpressure:** Using Kafka as a buffer to ensure the Processor doesn't crash during market volatility.
-* **State Management:** Balancing ephemeral data (Redis) with persistent data (Postgres).
-* **Schema Evolution:** Using Protobuf to ensure forward/backward compatibility between microservices.
+```bash
+docker-compose up -d
+```
 
+### 2. Set Environment Variables
+
+Create a `.env` file in the project root:
+
+```env
+FINNHUB_API_KEY=your_api_key_here
+KAFKA_BROKERS=localhost:9092
+REDIS_ADDR=localhost:6379
+DATABASE_URL=user=user password=password dbname=gostocks sslmode=disable host=127.0.0.1 port=5433
+```
+
+### 3. Run Services (in separate terminals)
+
+```bash
+# Terminal 1: Alert Service (gRPC + Kafka Consumer)
+go run cmd/alert/main.go
+
+# Terminal 2: API Gateway
+go run cmd/gateway/main.go
+
+# Terminal 3: Processor (Kafka → Redis)
+go run cmd/processor/main.go
+
+# Terminal 4: Ingestor (Finnhub → Kafka)
+go run cmd/ingestor/main.go
+```
+
+## 📡 API Endpoints
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/health` | Health check |
+| `GET` | `/price/:symbol` | Get latest price from Redis |
+| `POST` | `/alerts` | Create a new price alert |
+| `GET` | `/alerts?user_id=1&active_only=true` | List alerts |
+
+### Examples
+
+```bash
+# Get price
+curl http://localhost:8080/price/AAPL
+
+# Create alert
+curl -X POST http://localhost:8080/alerts \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": 1, "symbol": "AAPL", "target_price": 150.00, "condition": "ABOVE"}'
+
+# List active alerts for user
+curl "http://localhost:8080/alerts?user_id=1&active_only=true"
+```
+
+## 🧪 Running Tests
+
+```bash
+go test ./...
+```
+
+## 📁 Project Structure
+
+```
+.
+├── cmd/
+│   ├── alert/          # Alert Service entry point
+│   ├── gateway/        # API Gateway entry point
+│   ├── ingestor/       # Ingestor Service entry point
+│   └── processor/      # Processor Service entry point
+├── internal/
+│   ├── alert/          # Alert business logic, gRPC server, Kafka consumer
+│   ├── gateway/        # HTTP handlers, Redis & gRPC clients
+│   ├── ingestor/       # WebSocket client, Kafka producer
+│   └── processor/      # Kafka consumer, Redis updater
+├── proto/
+│   ├── alert/          # Generated gRPC code for alerts
+│   ├── stock/          # Generated Protobuf code for stock ticks
+│   ├── alert.proto     # Alert service definition
+│   └── stock.proto     # Stock tick message definition
+├── docker-compose.yml  # Infrastructure (Kafka, Redis, Postgres)
+├── go.mod
+└── README.md
+```
+
+## 🎯 Engineering Highlights
+
+* **Event-Driven Architecture:** Kafka decouples services for independent scaling and fault tolerance.
+* **Consumer Groups:** Multiple instances can share the workload; if one crashes, others take over.
+* **Graceful Shutdown:** All services handle SIGINT/SIGTERM for clean resource cleanup.
+* **Structured Logging:** JSON logs (slog) for easy parsing by monitoring tools.
+* **Protocol Buffers:** Efficient serialization with forward/backward compatibility.
+* **Speed Layer Pattern:** Redis for sub-millisecond reads, Postgres for durability.
