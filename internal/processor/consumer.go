@@ -1,7 +1,8 @@
 package processor
 
 import (
-	"log"
+	"context"
+	"log/slog"
 	"time"
 
 	"github.com/IBM/sarama"
@@ -13,67 +14,98 @@ import (
 type Consumer struct {
 	brokers []string
 	topic   string
+	groupID string
 }
 
 // NewConsumer creates a Consumer instance.
-// brokers: List of Kafka bootstrap servers (e.g., ["localhost:9092"])
-// topic: The Kafka topic name to consume from (e.g., "market_ticks")
 func NewConsumer(brokers []string, topic string) *Consumer {
 	return &Consumer{
 		brokers: brokers,
 		topic:   topic,
+		groupID: "processor-group",
 	}
 }
 
-// Start initializes the Kafka connection and enters a blocking loop.
-// It consumes messages from Partition 0 and logs throughput metrics.
-func (c *Consumer) Start() error {
-	// 1. Configure Sarama
+// Start initializes the Kafka consumer group and starts processing.
+func (c *Consumer) Start(ctx context.Context) error {
 	config := sarama.NewConfig()
 	config.Consumer.Return.Errors = true
+	// Start consuming from the oldest offset if no offset is committed
+	config.Consumer.Offsets.Initial = sarama.OffsetOldest
 
-	// 2. Connect to Broker
-	consumer, err := sarama.NewConsumer(c.brokers, config)
+	group, err := sarama.NewConsumerGroup(c.brokers, c.groupID, config)
 	if err != nil {
 		return err
 	}
-	// ... defer close ...
+	defer group.Close()
 
-	// 3. Start Consuming Partition 0
-	// OffsetNewest means we only see messages sent after we connect.
-	partitionConsumer, err := consumer.ConsumePartition(c.topic, 0, sarama.OffsetNewest)
-	if err != nil {
-		return err
+	slog.Info("Connected to Kafka Consumer Group", "group", c.groupID, "topic", c.topic)
+
+	// Handler for consumer group
+	handler := &GroupHandler{}
+
+	for {
+		// Consume claims runs the handler for the claimed partitions
+		if err := group.Consume(ctx, []string{c.topic}, handler); err != nil {
+			slog.Error("Error from consumer group", "error", err)
+			return err
+		}
+		// Check if context was cancelled
+		if ctx.Err() != nil {
+			return nil
+		}
 	}
-	// ... defer close ...
+}
 
-	log.Printf("Connected to Kafka, consuming topic: %s", c.topic)
+// GroupHandler implements sarama.ConsumerGroupHandler
+type GroupHandler struct {
+	msgCount int
+}
 
-	// 4. Main Event Loop
-	msgCount := 0
+func (h *GroupHandler) Setup(sarama.ConsumerGroupSession) error {
+	slog.Info("Consumer group session setup")
+	return nil
+}
+
+func (h *GroupHandler) Cleanup(sarama.ConsumerGroupSession) error {
+	slog.Info("Consumer group session cleanup")
+	return nil
+}
+
+func (h *GroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+	// Report throughput
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
+	msgChan := claim.Messages()
+
 	for {
 		select {
-		case msg := <-partitionConsumer.Messages():
-			// A. Deserialize Protobuf
+		case msg, ok := <-msgChan:
+			if !ok {
+				return nil
+			}
+
+			// Process message
 			var tick stock.StockTick
 			if err := proto.Unmarshal(msg.Value, &tick); err != nil {
-				log.Printf("Error unmarshaling message: %v", err)
+				slog.Error("Error unmarshaling message", "error", err)
 				continue
 			}
-			msgCount++ // B. Increment metric
+
+			h.msgCount++
+
+			// Mark message as marked
+			session.MarkMessage(msg, "")
 
 		case <-ticker.C:
-			// C. Report Throughput
-			if msgCount > 0 {
-				log.Printf("Throughput: %d messages/sec", msgCount)
-				msgCount = 0
+			if h.msgCount > 0 {
+				slog.Info("Throughput", "msgs_per_sec", h.msgCount)
+				h.msgCount = 0
 			}
 
-		case err := <-partitionConsumer.Errors():
-			log.Printf("Kafka error: %v", err)
+		case <-session.Context().Done():
+			return nil
 		}
 	}
 }

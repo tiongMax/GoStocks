@@ -1,7 +1,7 @@
 package main
 
 import (
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -11,6 +11,10 @@ import (
 )
 
 func main() {
+	// Configure JSON logger
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+
 	// 1. Configuration
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -28,22 +32,24 @@ func main() {
 	}
 
 	// 2. Connect to Redis (Speed Layer)
-	log.Println("Connecting to Redis...")
+	slog.Info("Connecting to Redis...")
 	redisClient, err := gateway.NewRedisClient(redisAddr)
 	if err != nil {
-		log.Fatalf("Failed to connect to Redis: %v", err)
+		slog.Error("Failed to connect to Redis", "error", err)
+		os.Exit(1)
 	}
 	defer redisClient.Close()
-	log.Println("Connected to Redis.")
+	slog.Info("Connected to Redis")
 
 	// 3. Connect to Alert Service (gRPC)
-	log.Println("Connecting to Alert Service...")
+	slog.Info("Connecting to Alert Service...")
 	alertClient, err := gateway.NewAlertClient(alertServiceAddr)
 	if err != nil {
-		log.Fatalf("Failed to connect to Alert Service: %v", err)
+		slog.Error("Failed to connect to Alert Service", "error", err)
+		os.Exit(1)
 	}
 	defer alertClient.Close()
-	log.Println("Connected to Alert Service.")
+	slog.Info("Connected to Alert Service")
 
 	// 4. Set up Gin router
 	router := gin.Default()
@@ -63,17 +69,18 @@ func main() {
 
 	// 5. Start server in goroutine
 	go func() {
-		log.Printf("API Gateway listening on :%s", port)
+		slog.Info("API Gateway listening", "port", port)
 		if err := router.Run(":" + port); err != nil {
-			log.Fatalf("Failed to start server: %v", err)
+			slog.Error("Failed to start server", "error", err)
+			os.Exit(1)
 		}
 	}()
 
 	// 6. Wait for shutdown signal
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
 
-	log.Println("Shutting down API Gateway...")
+	sig := <-stop
+	slog.Info("Shutdown signal received", "signal", sig)
+	slog.Info("Shutting down API Gateway...")
 }
-

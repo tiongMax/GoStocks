@@ -1,8 +1,8 @@
 package alert
 
 import (
-	"log"
-	"sync"
+	"context"
+	"log/slog"
 	"time"
 
 	"github.com/IBM/sarama"
@@ -12,12 +12,10 @@ import (
 
 // Consumer listens to Kafka and triggers alerts based on price conditions.
 type Consumer struct {
-	brokers  []string
-	topic    string
-	store    *Store
-	done     chan struct{}
-	wg       sync.WaitGroup
-	consumer sarama.Consumer
+	brokers []string
+	topic   string
+	store   *Store
+	groupID string
 }
 
 // NewConsumer creates a new Kafka consumer for the Alert Service.
@@ -26,109 +24,123 @@ func NewConsumer(brokers []string, topic string, store *Store) *Consumer {
 		brokers: brokers,
 		topic:   topic,
 		store:   store,
-		done:    make(chan struct{}),
+		groupID: "alert-service-group",
 	}
 }
 
 // Start begins consuming messages from Kafka and checking alerts.
-func (c *Consumer) Start() error {
+func (c *Consumer) Start(ctx context.Context) error {
 	config := sarama.NewConfig()
 	config.Consumer.Return.Errors = true
+	config.Consumer.Offsets.Initial = sarama.OffsetOldest
 
-	consumer, err := sarama.NewConsumer(c.brokers, config)
+	group, err := sarama.NewConsumerGroup(c.brokers, c.groupID, config)
 	if err != nil {
 		return err
 	}
-	c.consumer = consumer
+	defer group.Close()
 
-	partitionConsumer, err := consumer.ConsumePartition(c.topic, 0, sarama.OffsetNewest)
-	if err != nil {
-		consumer.Close()
-		return err
+	slog.Info("Connected to Kafka Consumer Group", "group", c.groupID, "topic", c.topic)
+
+	handler := &AlertGroupHandler{
+		store: c.store,
 	}
 
-	log.Printf("[Alert Consumer] Connected to Kafka, consuming topic: %s", c.topic)
-
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		defer partitionConsumer.Close()
-
-		// Metrics
-		tickCount := 0
-		alertsTriggered := 0
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-c.done:
-				log.Println("[Alert Consumer] Shutting down...")
-				return
-
-			case msg := <-partitionConsumer.Messages():
-				// 1. Deserialize the tick
-				var tick stock.StockTick
-				if err := proto.Unmarshal(msg.Value, &tick); err != nil {
-					log.Printf("[Alert Consumer] Error unmarshaling: %v", err)
-					continue
-				}
-				tickCount++
-
-				// 2. Check alerts for this symbol
-				triggered, err := c.checkAlerts(tick.Symbol, tick.Price)
-				if err != nil {
-					log.Printf("[Alert Consumer] Error checking alerts: %v", err)
-					continue
-				}
-				alertsTriggered += triggered
-
-			case err := <-partitionConsumer.Errors():
-				log.Printf("[Alert Consumer] Kafka error: %v", err)
-
-			case <-ticker.C:
-				if tickCount > 0 || alertsTriggered > 0 {
-					log.Printf("[Alert Consumer] Processed %d ticks, triggered %d alerts in last 10s",
-						tickCount, alertsTriggered)
-					tickCount = 0
-					alertsTriggered = 0
-				}
-			}
+	for {
+		if err := group.Consume(ctx, []string{c.topic}, handler); err != nil {
+			slog.Error("Error from consumer group", "error", err)
+			return err
 		}
-	}()
+		if ctx.Err() != nil {
+			return nil
+		}
+	}
+}
 
+// AlertGroupHandler implements sarama.ConsumerGroupHandler
+type AlertGroupHandler struct {
+	store *Store
+}
+
+func (h *AlertGroupHandler) Setup(sarama.ConsumerGroupSession) error {
 	return nil
 }
 
+func (h *AlertGroupHandler) Cleanup(sarama.ConsumerGroupSession) error {
+	return nil
+}
+
+func (h *AlertGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+	// Metrics
+	tickCount := 0
+	alertsTriggered := 0
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	msgChan := claim.Messages()
+
+	for {
+		select {
+		case msg, ok := <-msgChan:
+			if !ok {
+				return nil
+			}
+
+			// 1. Deserialize the tick
+			var tick stock.StockTick
+			if err := proto.Unmarshal(msg.Value, &tick); err != nil {
+				slog.Error("Error unmarshaling message", "error", err)
+				continue
+			}
+			tickCount++
+
+			// 2. Check alerts for this symbol
+			triggered, err := h.checkAlerts(tick.Symbol, tick.Price)
+			if err != nil {
+				slog.Error("Error checking alerts", "error", err)
+				continue
+			}
+			alertsTriggered += triggered
+
+			// Mark message
+			session.MarkMessage(msg, "")
+
+		case <-ticker.C:
+			if tickCount > 0 || alertsTriggered > 0 {
+				slog.Info("Metrics", "ticks_processed", tickCount, "alerts_triggered", alertsTriggered)
+				tickCount = 0
+				alertsTriggered = 0
+			}
+
+		case <-session.Context().Done():
+			return nil
+		}
+	}
+}
+
 // checkAlerts compares the current price against all active alerts for a symbol.
-// Returns the number of alerts triggered.
-func (c *Consumer) checkAlerts(symbol string, price float64) (int, error) {
-	alerts, err := c.store.GetActiveAlertsBySymbol(symbol)
+func (h *AlertGroupHandler) checkAlerts(symbol string, price float64) (int, error) {
+	alerts, err := h.store.GetActiveAlertsBySymbol(symbol)
 	if err != nil {
 		return 0, err
 	}
 
 	triggered := 0
 	for _, alert := range alerts {
-		shouldTrigger := false
-
-		switch alert.Condition {
-		case "ABOVE":
-			shouldTrigger = price >= alert.TargetPrice
-		case "BELOW":
-			shouldTrigger = price <= alert.TargetPrice
-		}
-
-		if shouldTrigger {
+		if ShouldTriggerAlert(alert.Condition, alert.TargetPrice, price) {
 			// Mark as triggered in database
-			if err := c.store.MarkAlertTriggered(alert.ID); err != nil {
-				log.Printf("[Alert Consumer] Failed to mark alert %d as triggered: %v", alert.ID, err)
+			if err := h.store.MarkAlertTriggered(alert.ID); err != nil {
+				slog.Error("Failed to mark alert as triggered", "alert_id", alert.ID, "error", err)
 				continue
 			}
 
-			// Log the trigger (in production, this would send a notification)
-			log.Printf("🔔 ALERT TRIGGERED! User %d: %s is now $%.2f (%s $%.2f)",
-				alert.UserID, symbol, price, alert.Condition, alert.TargetPrice)
+			// Log the trigger
+			slog.Info("🔔 ALERT TRIGGERED!",
+				"user_id", alert.UserID,
+				"symbol", symbol,
+				"price", price,
+				"condition", alert.Condition,
+				"target_price", alert.TargetPrice)
 
 			triggered++
 		}
@@ -137,13 +149,14 @@ func (c *Consumer) checkAlerts(symbol string, price float64) (int, error) {
 	return triggered, nil
 }
 
-// Stop gracefully shuts down the consumer.
-func (c *Consumer) Stop() {
-	close(c.done)
-	c.wg.Wait()
-	if c.consumer != nil {
-		c.consumer.Close()
+// ShouldTriggerAlert contains the pure logic for checking if an alert condition is met.
+func ShouldTriggerAlert(condition string, targetPrice, currentPrice float64) bool {
+	switch condition {
+	case "ABOVE":
+		return currentPrice >= targetPrice
+	case "BELOW":
+		return currentPrice <= targetPrice
+	default:
+		return false
 	}
-	log.Println("[Alert Consumer] Stopped.")
 }
-

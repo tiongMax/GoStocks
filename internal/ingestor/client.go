@@ -2,7 +2,7 @@ package ingestor
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 
 	"github.com/IBM/sarama"
 	"github.com/gorilla/websocket"
@@ -10,17 +10,16 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// Client represents the ingestor client that connects to the Finnhub WebSocket API
-// and produces market data messages to a Kafka topic.
+// Client represents the ingestor client.
 type Client struct {
 	apiKey   string
 	conn     *websocket.Conn
 	symbols  []string
 	producer sarama.SyncProducer
+	done     chan struct{}
 }
 
-// NewClient creates a new instance of the ingestor Client.
-// It initializes the Kafka producer with the provided broker addresses.
+// NewClient creates a new ingestor client.
 func NewClient(apiKey string, symbols []string, kafkaBrokers []string) (*Client, error) {
 	config := sarama.NewConfig()
 	config.Producer.Return.Successes = true
@@ -36,14 +35,14 @@ func NewClient(apiKey string, symbols []string, kafkaBrokers []string) (*Client,
 		apiKey:   apiKey,
 		symbols:  symbols,
 		producer: producer,
+		done:     make(chan struct{}),
 	}, nil
 }
 
-// Start connects to the Finnhub WebSocket API, subscribes to the configured symbols,
-// and starts the background read loop to process incoming trade messages.
+// Start connects to WebSocket and starts the read loop.
 func (c *Client) Start() error {
 	url := "wss://ws.finnhub.io?token=" + c.apiKey
-	log.Printf("Connecting to %s", url)
+	slog.Info("Connecting to Finnhub", "url", url)
 
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
@@ -51,7 +50,6 @@ func (c *Client) Start() error {
 	}
 	c.conn = conn
 
-	// Subscribe to symbols
 	for _, s := range c.symbols {
 		msg := map[string]interface{}{
 			"type":   "subscribe",
@@ -60,78 +58,89 @@ func (c *Client) Start() error {
 		if err := c.conn.WriteJSON(msg); err != nil {
 			return err
 		}
-		log.Printf("Subscribed to %s", s)
+		slog.Info("Subscribed to symbol", "symbol", s)
 	}
 
-	// Start reading loop
 	go c.readLoop()
 	return nil
 }
 
-// readLoop continuously reads messages from the WebSocket connection,
-// processes trade data, and sends it to the Kafka topic.
-// It handles JSON unmarshalling, Protobuf serialization, and Kafka production.
 func (c *Client) readLoop() {
 	defer c.conn.Close()
+
 	for {
-		_, message, err := c.conn.ReadMessage()
-		if err != nil {
-			log.Println("read:", err)
+		select {
+		case <-c.done:
 			return
-		}
-
-		var response FinnhubResponse
-		if err := json.Unmarshal(message, &response); err != nil {
-			log.Printf("Error parsing JSON: %v", err)
-			continue
-		}
-
-		if response.Type == "trade" {
-			for _, trade := range response.Data {
-				log.Printf("Tick: %s | Price: %.2f | Time: %d", trade.Symbol, trade.Price, trade.Timestamp)
-
-				// Create Protobuf message
-				tick := &stock.StockTick{
-					Symbol:    trade.Symbol,
-					Price:     trade.Price,
-					Timestamp: trade.Timestamp,
+		default:
+			_, message, err := c.conn.ReadMessage()
+			if err != nil {
+				// Only log error if not closing
+				select {
+				case <-c.done:
+					return
+				default:
+					slog.Error("WebSocket read error", "error", err)
+					return
 				}
+			}
 
-				// Serialize to bytes
-				bytes, err := proto.Marshal(tick)
-				if err != nil {
-					log.Printf("Failed to marshal protobuf: %v", err)
-					continue
-				}
+			var response FinnhubResponse
+			if err := json.Unmarshal(message, &response); err != nil {
+				slog.Error("JSON parse error", "error", err)
+				continue
+			}
 
-				// Send to Kafka
-				msg := &sarama.ProducerMessage{
-					Topic: "market_ticks",
-					Key:   sarama.StringEncoder(trade.Symbol), // Use Symbol as Key for ordering
-					Value: sarama.ByteEncoder(bytes),
-				}
-
-				partition, offset, err := c.producer.SendMessage(msg)
-				if err != nil {
-					log.Printf("Failed to send message to Kafka: %v", err)
-				} else {
-					log.Printf("Message sent to partition %d at offset %d", partition, offset)
-				}
+			if response.Type == "trade" {
+				c.processTrades(response.Data)
 			}
 		}
 	}
 }
 
-// Close gracefully shuts down the client by closing the Kafka producer
-// and sending a close message to the WebSocket connection.
-func (c *Client) Close() error {
-	if c.producer != nil {
-		if err := c.producer.Close(); err != nil {
-			log.Println("Error closing Kafka producer:", err)
+func (c *Client) processTrades(trades []TradeData) {
+	for _, trade := range trades {
+		slog.Debug("Processing tick", "symbol", trade.Symbol, "price", trade.Price)
+
+		tick := &stock.StockTick{
+			Symbol:    trade.Symbol,
+			Price:     trade.Price,
+			Timestamp: trade.Timestamp,
+		}
+
+		bytes, err := proto.Marshal(tick)
+		if err != nil {
+			slog.Error("Protobuf marshal error", "error", err)
+			continue
+		}
+
+		msg := &sarama.ProducerMessage{
+			Topic: "market_ticks",
+			Key:   sarama.StringEncoder(trade.Symbol),
+			Value: sarama.ByteEncoder(bytes),
+		}
+
+		partition, offset, err := c.producer.SendMessage(msg)
+		if err != nil {
+			slog.Error("Kafka send error", "error", err)
+		} else {
+			slog.Debug("Message sent", "partition", partition, "offset", offset)
 		}
 	}
+}
+
+// Close shuts down the client.
+func (c *Client) Close() error {
+	close(c.done)
+
 	if c.conn != nil {
-		return c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		// Send close message
+		c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		c.conn.Close()
+	}
+
+	if c.producer != nil {
+		return c.producer.Close()
 	}
 	return nil
 }

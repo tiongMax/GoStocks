@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -33,11 +34,13 @@ func (h *Handler) GetPrice(c *gin.Context) {
 
 	price, err := h.redis.GetPrice(c.Request.Context(), symbol)
 	if err != nil {
+		slog.Error("Redis lookup failed", "symbol", symbol, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
 	if price == nil {
+		slog.Debug("Symbol not found in Redis", "symbol", symbol)
 		c.JSON(http.StatusNotFound, gin.H{"error": "symbol not found", "symbol": symbol})
 		return
 	}
@@ -50,6 +53,7 @@ func (h *Handler) GetPrice(c *gin.Context) {
 func (h *Handler) CreateAlert(c *gin.Context) {
 	var req CreateAlertRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		slog.Warn("Invalid CreateAlert payload", "error", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -60,10 +64,12 @@ func (h *Handler) CreateAlert(c *gin.Context) {
 
 	resp, err := h.alertClient.CreateAlert(c.Request.Context(), &req)
 	if err != nil {
+		slog.Error("Failed to create alert", "symbol", req.Symbol, "user_id", req.UserID, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
+	slog.Info("Alert created", "alert_id", resp.AlertID, "symbol", req.Symbol)
 	c.JSON(http.StatusCreated, resp)
 }
 
@@ -88,6 +94,7 @@ func (h *Handler) GetAlerts(c *gin.Context) {
 
 	alerts, err := h.alertClient.GetAlerts(c.Request.Context(), userID, activeOnly)
 	if err != nil {
+		slog.Error("Failed to fetch alerts", "user_id", userID, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}

@@ -1,26 +1,32 @@
 package main
 
 import (
-	"log"
 	"os"
 	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/tiongMax/gostocks/internal/ingestor"
+	"github.com/tiongMax/gostocks/pkg/logger"
+	"log/slog"
 )
 
 func main() {
-	// 0. Load Environment Variables
+	// 0. Initialize Logger
+	logger.Init()
+
+	// 1. Load Environment Variables
 	if err := godotenv.Load(".env"); err != nil {
-		log.Println("No .env file found, using system environment variables")
+		slog.Info("No .env file found, using system environment variables")
 	}
 
-	// 1. Get API Key
+	// 2. Configuration
 	apiKey := os.Getenv("FINNHUB_API_KEY")
 	if apiKey == "" {
-		log.Fatal("FINNHUB_API_KEY environment variable is not set")
+		slog.Error("FINNHUB_API_KEY environment variable is not set")
+		os.Exit(1)
 	}
 
 	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
@@ -29,29 +35,33 @@ func main() {
 	}
 	brokers := strings.Split(kafkaBrokers, ",")
 
-	// 2. Initialize and Start Client
+	// 3. Initialize Client
 	symbols := []string{"AAPL", "BINANCE:BTCUSDT", "IC MARKETS:1"}
 	client, err := ingestor.NewClient(apiKey, symbols, brokers)
 	if err != nil {
-		log.Fatal("Failed to create ingestor client:", err)
+		slog.Error("Failed to create ingestor client", "error", err)
+		os.Exit(1)
 	}
 
+	// 4. Start Client
 	if err := client.Start(); err != nil {
-		log.Fatal("Failed to start ingestor:", err)
+		slog.Error("Failed to start ingestor", "error", err)
+		os.Exit(1)
 	}
 
-	// 3. Handle Graceful Shutdown
-	interrupt := make(chan os.Signal, 1)
-	signal.Notify(interrupt, os.Interrupt)
+	// 5. Wait for Shutdown Signal
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
-	<-interrupt
-	log.Println("Interrupt received, shutting down...")
+	sig := <-stop
+	slog.Info("Shutdown signal received", "signal", sig)
 
+	// 6. Graceful Shutdown
 	if err := client.Close(); err != nil {
-		log.Println("Error closing connection:", err)
+		slog.Error("Error closing client", "error", err)
 	}
 
-	// Give it a moment to close
+	// Give it a moment to flush buffers
 	time.Sleep(1 * time.Second)
-	log.Println("Shutdown complete")
+	slog.Info("Ingestor service stopped")
 }

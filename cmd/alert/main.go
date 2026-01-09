@@ -1,7 +1,8 @@
 package main
 
 import (
-	"log"
+	"context"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -15,6 +16,10 @@ import (
 )
 
 func main() {
+	// Configure JSON logger
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+
 	// 1. Database Connection String
 	connStr := os.Getenv("DATABASE_URL")
 	if connStr == "" {
@@ -40,26 +45,33 @@ func main() {
 	}
 
 	// 4. Connect to Database
-	log.Println("Connecting to database...")
+	slog.Info("Connecting to database...")
 	store, err := alert.NewStore(connStr)
 	if err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
+		slog.Error("Failed to connect to database", "error", err)
+		os.Exit(1)
 	}
 	defer store.Close()
 
 	// 5. Auto-migrate schema
-	log.Println("Auto-migrating schema...")
+	slog.Info("Auto-migrating schema...")
 	if err := store.AutoMigrate(); err != nil {
-		log.Fatalf("Failed to auto-migrate schema: %v", err)
+		slog.Error("Failed to auto-migrate schema", "error", err)
+		os.Exit(1)
 	}
-	log.Println("Schema migrated successfully.")
+	slog.Info("Schema migrated successfully")
 
 	// 6. Start Kafka Consumer (Trigger Logic)
+	ctx, cancel := context.WithCancel(context.Background())
 	consumer := alert.NewConsumer(brokers, kafkaTopic, store)
-	if err := consumer.Start(); err != nil {
-		log.Fatalf("Failed to start Kafka consumer: %v", err)
-	}
-	defer consumer.Stop()
+
+	go func() {
+		slog.Info("Starting Alert Consumer")
+		if err := consumer.Start(ctx); err != nil {
+			slog.Error("Alert Consumer failed", "error", err)
+			cancel() // Stop everything if consumer fails
+		}
+	}()
 
 	// 7. Create gRPC Server
 	grpcServer := grpc.NewServer()
@@ -72,25 +84,34 @@ func main() {
 	// 8. Start gRPC Listener
 	listener, err := net.Listen("tcp", ":"+grpcPort)
 	if err != nil {
-		log.Fatalf("Failed to listen on port %s: %v", grpcPort, err)
+		slog.Error("Failed to listen on port", "port", grpcPort, "error", err)
+		os.Exit(1)
 	}
 
 	// 9. Run gRPC Server in goroutine
 	go func() {
-		log.Printf("Alert Service gRPC server listening on :%s", grpcPort)
+		slog.Info("Alert Service gRPC server listening", "port", grpcPort)
 		if err := grpcServer.Serve(listener); err != nil {
-			log.Fatalf("Failed to serve gRPC: %v", err)
+			slog.Error("Failed to serve gRPC", "error", err)
+			cancel()
 		}
 	}()
 
-	log.Println("Alert Service is fully running (gRPC + Kafka Consumer)")
+	slog.Info("Alert Service is fully running (gRPC + Kafka Consumer)")
 
 	// 10. Wait for shutdown signal
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
 
-	log.Println("Shutting down Alert Service...")
+	select {
+	case sig := <-stop:
+		slog.Info("Shutdown signal received", "signal", sig)
+	case <-ctx.Done():
+		slog.Info("Context cancelled, shutting down")
+	}
+
+	// Graceful shutdown
+	cancel()
 	grpcServer.GracefulStop()
-	log.Println("Alert Service stopped.")
+	slog.Info("Alert Service stopped")
 }

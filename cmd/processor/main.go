@@ -1,25 +1,28 @@
 package main
 
 import (
-	"log"
+	"context"
+	"log/slog"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/joho/godotenv"
 	"github.com/tiongMax/gostocks/internal/processor"
 )
 
 func main() {
+	// Configure JSON logger
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+
 	// 1. Load Environment Variables
-	// Tries to load variables from a local .env file.
-	// If missing, it falls back to system-level environment variables (useful for Docker/CI).
 	if err := godotenv.Load(".env"); err != nil {
-		log.Println("No .env file found, using system environment variables")
+		slog.Info("No .env file found, using system environment variables")
 	}
 
 	// 2. Configure Kafka Brokers
-	// Fetches the comma-separated list of brokers (e.g., "host1:9092,host2:9092").
-	// Defaults to "localhost:9092" for local development.
 	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
 	if kafkaBrokers == "" {
 		kafkaBrokers = "localhost:9092"
@@ -27,14 +30,25 @@ func main() {
 	brokers := strings.Split(kafkaBrokers, ",")
 
 	// 3. Initialize Consumer
-	// Creates a new consumer instance pointing to the 'market_ticks' topic.
-	log.Println("Starting Processor Service...")
+	slog.Info("Starting Processor Service...")
 	consumer := processor.NewConsumer(brokers, "market_ticks")
 
-	// 4. Start Processing
-	// consumer.Start() is a blocking call that enters a loop to consume messages.
-	// The program will exit only if Start() returns an error (e.g., connection failure).
-	if err := consumer.Start(); err != nil {
-		log.Fatal("Failed to start processor:", err)
+	// 4. Handle Shutdown Signals
+	ctx, cancel := context.WithCancel(context.Background())
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		sig := <-sigChan
+		slog.Info("Shutdown signal received", "signal", sig)
+		cancel()
+	}()
+
+	// 5. Start Processing
+	if err := consumer.Start(ctx); err != nil {
+		slog.Error("Processor failed", "error", err)
+		os.Exit(1)
 	}
+
+	slog.Info("Processor Service stopped successfully")
 }
